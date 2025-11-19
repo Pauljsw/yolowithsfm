@@ -36,8 +36,8 @@ sfm:
 
 # Pixel-to-MM Calibration
 pixel_calibration:
-  save_maps: false          # Save individual scale maps (.npy)
-  num_samples: 25            # 3x3 grid sampling
+  save_maps: true           # Save individual scale maps (.npy) for position-specific accuracy
+  num_samples: 9            # 3x3 grid sampling (default)
 
 # Point Cloud Overlay
 point_cloud_overlay:

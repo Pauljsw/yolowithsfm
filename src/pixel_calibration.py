@@ -74,8 +74,10 @@ def calculate_pixel_scale_map(
         if d < 0.1 or d > 10.0 or np.isnan(d) or np.isinf(d):
             continue
 
-        # Pixel size in mm (using fx for horizontal, could use fy for vertical)
-        pixel_mm = (d / fx) * 1000.0
+        # Pixel size in mm using geometric mean of fx and fy
+        # This accounts for non-square pixels (fx != fy)
+        f_mean = np.sqrt(fx * fy)
+        pixel_mm = (d / f_mean) * 1000.0
 
         scales.append(pixel_mm)
         valid_positions.append([u, v])
@@ -90,11 +92,24 @@ def calculate_pixel_scale_map(
     # Interpolate to full image
     grid_u, grid_v = np.meshgrid(np.arange(w), np.arange(h))
 
+    # Choose interpolation method based on number of samples
+    # Cubic requires ~16+ samples for stability, linear ~4+, otherwise nearest
+    n_samples = len(valid_positions)
+    if n_samples < 12:
+        method = 'nearest'
+        logger.debug(f"Using 'nearest' interpolation ({n_samples} samples)")
+    elif n_samples < 30:
+        method = 'linear'
+        logger.debug(f"Using 'linear' interpolation ({n_samples} samples)")
+    else:
+        method = 'cubic'
+        logger.debug(f"Using 'cubic' interpolation ({n_samples} samples)")
+
     scale_map = griddata(
         valid_positions,
         scales,
         (grid_u, grid_v),
-        method='cubic',
+        method=method,
         fill_value=np.median(scales)
     )
 
@@ -121,7 +136,7 @@ def run_pixel_calibration(
     depth_dir: str,
     calib_path: str,
     output_json: str,
-    save_maps: bool = False,
+    save_maps: bool = True,  # Changed default to True for better accuracy
     map_dir: str = None
 ):
     """
@@ -154,8 +169,9 @@ def run_pixel_calibration(
     output_path = Path(output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Setup scale maps directory
+    map_path = Path(map_dir) if map_dir else output_path.parent / "scale_maps"
     if save_maps:
-        map_path = Path(map_dir) if map_dir else output_path.parent / "scale_maps"
         map_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Saving scale maps to: {map_path}")
 
@@ -179,8 +195,6 @@ def run_pixel_calibration(
                 depth, calib.K, calib.D
             )
 
-            calibration_data[pair_id] = stats
-
             logger.info(f"  Mean: {stats['mean_scale_mm']:.3f} mm/px, "
                        f"Range: [{stats['min_scale_mm']:.3f}, {stats['max_scale_mm']:.3f}]")
 
@@ -188,6 +202,10 @@ def run_pixel_calibration(
             if save_maps:
                 map_file = map_path / f"{pair_id}.npy"
                 np.save(map_file, scale_map)
+                stats['scale_map_path'] = str(map_file)
+                logger.debug(f"  Saved scale map: {map_file}")
+
+            calibration_data[pair_id] = stats
 
         except Exception as e:
             logger.error(f"  Failed to calibrate {pair_id}: {e}")

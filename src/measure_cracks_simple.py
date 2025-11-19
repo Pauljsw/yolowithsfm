@@ -169,15 +169,17 @@ def measure_perpendicular_width(
 def measure_crack_in_image(
     mask_json: Dict,
     pixel_scale: float,
-    img_shape: Tuple[int, int] = (2160, 3840)
+    img_shape: Tuple[int, int] = (2160, 3840),
+    scale_map: np.ndarray = None
 ) -> List[Dict]:
     """
     Measure all cracks in one image.
 
     Args:
         mask_json: YOLO mask JSON
-        pixel_scale: Pixel-to-mm scale (mm/pixel)
+        pixel_scale: Pixel-to-mm scale (mm/pixel) - used as fallback if scale_map is None
         img_shape: Image shape (H, W)
+        scale_map: Optional position-specific scale map (H, W) for improved accuracy
 
     Returns:
         List of measurements
@@ -212,9 +214,34 @@ def measure_crack_in_image(
         # Measure width
         width_px = measure_perpendicular_width(skeleton, mask_processed)
 
-        # Convert to mm
-        length_mm = length_px * pixel_scale
-        width_mm = width_px * pixel_scale
+        # Convert to mm using position-specific scales if available
+        if scale_map is not None:
+            # Use scale map for accurate position-specific conversion
+            skeleton_coords = np.column_stack(np.where(skeleton > 0))
+
+            if len(skeleton_coords) > 0:
+                # Sample scales along skeleton
+                skeleton_scales = []
+                for y, x in skeleton_coords:
+                    if 0 <= y < scale_map.shape[0] and 0 <= x < scale_map.shape[1]:
+                        skeleton_scales.append(scale_map[y, x])
+
+                if skeleton_scales:
+                    # Use median scale along skeleton
+                    effective_scale = np.median(skeleton_scales)
+                else:
+                    effective_scale = pixel_scale
+            else:
+                effective_scale = pixel_scale
+
+            length_mm = length_px * effective_scale
+            width_mm = width_px * effective_scale
+            used_scale = effective_scale
+        else:
+            # Fallback to uniform scale
+            length_mm = length_px * pixel_scale
+            width_mm = width_px * pixel_scale
+            used_scale = pixel_scale
 
         measurements.append({
             'mask_idx': idx,
@@ -223,7 +250,7 @@ def measure_crack_in_image(
             'length_mm': length_mm,
             'width_mm': width_mm,
             'confidence': confidence,
-            'pixel_scale_mm': pixel_scale
+            'pixel_scale_mm': used_scale
         })
 
     return measurements
@@ -268,15 +295,29 @@ def run_measurement(
         with open(mask_file, 'r') as f:
             mask_json = json.load(f)
 
-        # Get pixel scale (use mean if available)
+        # Get pixel scale and scale map (if available)
         if image_id in pixel_scales:
             pixel_scale = pixel_scales[image_id].get('mean_scale_mm', 1.0)
+            scale_map_path = pixel_scales[image_id].get('scale_map_path', None)
+
+            # Load scale map if path exists
+            scale_map = None
+            if scale_map_path and Path(scale_map_path).exists():
+                try:
+                    scale_map = np.load(scale_map_path)
+                    logger.debug(f"  Loaded scale map: {scale_map_path}")
+                except Exception as e:
+                    logger.warning(f"  Failed to load scale map: {e}")
+                    scale_map = None
         else:
             logger.warning(f"No pixel scale for {image_id}, using default 1.0 mm/px")
             pixel_scale = 1.0
+            scale_map = None
 
-        # Measure
-        measurements = measure_crack_in_image(mask_json, pixel_scale, img_shape)
+        # Measure (with scale map if available)
+        measurements = measure_crack_in_image(
+            mask_json, pixel_scale, img_shape, scale_map
+        )
 
         for meas in measurements:
             meas['image_id'] = image_id
