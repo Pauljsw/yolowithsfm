@@ -73,14 +73,22 @@ def is_pixel_in_crack_mask(
         try:
             poly = Polygon(polygon_coords)
 
-            # Check validity with detailed logging
+            # Auto-fix invalid polygons with buffer(0) trick
             if not poly.is_valid:
-                if image_stem:
-                    logger.warning(
-                        f"[{image_stem}] Mask {mask_idx}: Invalid polygon "
-                        f"(area={poly.area:.2f}, confidence={confidence:.3f})"
-                    )
-                continue
+                try:
+                    poly = poly.buffer(0)
+                    if image_stem:
+                        logger.debug(
+                            f"[{image_stem}] Mask {mask_idx}: Auto-fixed invalid polygon "
+                            f"(area={poly.area:.2f}, confidence={confidence:.3f})"
+                        )
+                except Exception:
+                    # If buffer(0) fails, skip this polygon
+                    if image_stem:
+                        logger.warning(
+                            f"[{image_stem}] Mask {mask_idx}: Cannot fix invalid polygon, skipping"
+                        )
+                    continue
 
             # Check if polygon is too small (degenerate)
             if poly.area < 1.0:
