@@ -192,21 +192,21 @@ def main():
         description="Plane-based crack clustering pipeline"
     )
 
-    # Input paths
+    # Input paths (기본값은 프로젝트 구조에 맞춤)
     parser.add_argument(
         '--rgb-dir', type=Path, default=Path('data/rgb'),
-        help='Directory with RGB images'
+        help='Directory with RGB images (camera_RGB_*.png)'
     )
     parser.add_argument(
         '--depth-dir', type=Path, default=Path('data/depth'),
-        help='Directory with aligned depth images'
+        help='Directory with aligned depth images (camera_DPT_*.png)'
     )
     parser.add_argument(
-        '--yolo-dir', type=Path, default=Path('outputs/yolo_detections'),
+        '--yolo-dir', type=Path, default=Path('data/yolo_masks'),
         help='Directory with YOLO detection JSONs'
     )
     parser.add_argument(
-        '--colmap-model', type=Path, default=Path('outputs/sfm/sparse/0'),
+        '--colmap-model', type=Path, default=Path('data/sfm/sparse/0'),
         help='Path to COLMAP sparse model directory'
     )
     parser.add_argument(
