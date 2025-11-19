@@ -336,20 +336,122 @@ class MaskTo3DConverter:
         return results
 
 
+def process_batch(
+    rgb_dir: str,
+    depth_dir: str,
+    yolo_dir: str,
+    output_dir: str,
+    rgb_calib: str,
+    depth_calib: str,
+    colmap_model: str
+):
+    """
+    Process all images in batch.
+
+    Args:
+        rgb_dir: Directory with RGB images (camera_RGB_*.png)
+        depth_dir: Directory with depth images (camera_DPT_*.png)
+        yolo_dir: Directory with YOLO results (camera_RGB_*.json)
+        output_dir: Output directory for 3D masks
+        rgb_calib: RGB camera calibration path
+        depth_calib: Depth camera calibration path
+        colmap_model: COLMAP model directory
+    """
+    from glob import glob
+    from tqdm import tqdm
+
+    # Create output directory
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Create converter (loads COLMAP once)
+    logger.info("Loading COLMAP model and calibration...")
+    converter = MaskTo3DConverter(
+        rgb_calib_path=rgb_calib,
+        depth_calib_path=depth_calib,
+        colmap_model_path=colmap_model
+    )
+
+    # Find all RGB images
+    rgb_files = sorted(glob(f"{rgb_dir}/camera_RGB_*.png"))
+    logger.info(f"Found {len(rgb_files)} RGB images")
+
+    # Process statistics
+    processed = 0
+    skipped = 0
+    failed = 0
+
+    # Process each image
+    for rgb_path in tqdm(rgb_files, desc="Processing images"):
+        filename = Path(rgb_path).name
+        timestamp = filename.replace("camera_RGB_", "").replace(".png", "")
+
+        depth_path = f"{depth_dir}/camera_DPT_{timestamp}.png"
+        yolo_path = f"{yolo_dir}/camera_RGB_{timestamp}.json"
+        output_path = f"{output_dir}/camera_RGB_{timestamp}.json"
+
+        # Check if files exist
+        if not Path(depth_path).exists():
+            logger.warning(f"Missing depth: {depth_path}")
+            skipped += 1
+            continue
+
+        if not Path(yolo_path).exists():
+            logger.warning(f"Missing YOLO: {yolo_path}")
+            skipped += 1
+            continue
+
+        # Process image
+        try:
+            results = converter.process_image(
+                image_path=rgb_path,
+                depth_path=depth_path,
+                yolo_results_path=yolo_path
+            )
+
+            # Save results
+            with open(output_path, 'w') as f:
+                json.dump(results, f, indent=2)
+
+            processed += 1
+
+        except Exception as e:
+            logger.error(f"Failed to process {filename}: {e}")
+            failed += 1
+
+    # Print summary
+    print("\n" + "="*60)
+    print("PROCESSING COMPLETE")
+    print("="*60)
+    print(f"Total files:  {len(rgb_files)}")
+    print(f"✅ Processed:  {processed}")
+    print(f"⚠️  Skipped:    {skipped}")
+    print(f"❌ Failed:     {failed}")
+    print(f"\nOutput: {output_dir}/")
+    print("="*60)
+
+
 def main():
-    """Example usage"""
+    """Main entry point"""
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Convert YOLO masks to lightweight 3D representation"
     )
-    parser.add_argument('--rgb-calib', required=True)
-    parser.add_argument('--depth-calib', required=True)
-    parser.add_argument('--colmap-model', required=True)
-    parser.add_argument('--image', required=True)
-    parser.add_argument('--depth', required=True)
-    parser.add_argument('--yolo-results', required=True)
-    parser.add_argument('--output', required=True)
+    parser.add_argument('--rgb-calib', required=True, help='RGB camera calibration JSON')
+    parser.add_argument('--depth-calib', required=True, help='Depth camera calibration JSON')
+    parser.add_argument('--colmap-model', required=True, help='COLMAP sparse model directory')
+
+    # Single image mode
+    parser.add_argument('--image', help='Single RGB image to process')
+    parser.add_argument('--depth', help='Single depth image')
+    parser.add_argument('--yolo-results', help='Single YOLO result JSON')
+    parser.add_argument('--output', help='Output JSON path')
+
+    # Batch mode
+    parser.add_argument('--rgb-dir', help='Directory with RGB images')
+    parser.add_argument('--depth-dir', help='Directory with depth images')
+    parser.add_argument('--yolo-dir', help='Directory with YOLO results')
+    parser.add_argument('--output-dir', help='Output directory')
 
     args = parser.parse_args()
 
@@ -359,28 +461,51 @@ def main():
         format='%(levelname)s - %(message)s'
     )
 
-    # Create converter
-    converter = MaskTo3DConverter(
-        rgb_calib_path=args.rgb_calib,
-        depth_calib_path=args.depth_calib,
-        colmap_model_path=args.colmap_model
-    )
+    # Batch mode
+    if args.rgb_dir:
+        if not all([args.depth_dir, args.yolo_dir, args.output_dir]):
+            parser.error("Batch mode requires: --rgb-dir, --depth-dir, --yolo-dir, --output-dir")
 
-    # Process image
-    results = converter.process_image(
-        image_path=args.image,
-        depth_path=args.depth,
-        yolo_results_path=args.yolo_results
-    )
+        process_batch(
+            rgb_dir=args.rgb_dir,
+            depth_dir=args.depth_dir,
+            yolo_dir=args.yolo_dir,
+            output_dir=args.output_dir,
+            rgb_calib=args.rgb_calib,
+            depth_calib=args.depth_calib,
+            colmap_model=args.colmap_model
+        )
 
-    # Save results
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Single image mode
+    elif args.image:
+        if not all([args.depth, args.yolo_results, args.output]):
+            parser.error("Single mode requires: --image, --depth, --yolo-results, --output")
 
-    with open(output_path, 'w') as f:
-        json.dump(results, f, indent=2)
+        # Create converter
+        converter = MaskTo3DConverter(
+            rgb_calib_path=args.rgb_calib,
+            depth_calib_path=args.depth_calib,
+            colmap_model_path=args.colmap_model
+        )
 
-    logger.info(f"Saved {len(results)} masks to {output_path}")
+        # Process image
+        results = converter.process_image(
+            image_path=args.image,
+            depth_path=args.depth,
+            yolo_results_path=args.yolo_results
+        )
+
+        # Save results
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, 'w') as f:
+            json.dump(results, f, indent=2)
+
+        logger.info(f"Saved {len(results)} masks to {output_path}")
+
+    else:
+        parser.error("Must specify either batch mode (--rgb-dir) or single mode (--image)")
 
 
 if __name__ == '__main__':
