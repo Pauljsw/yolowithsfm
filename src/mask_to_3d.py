@@ -259,7 +259,18 @@ class MaskTo3DConverter:
 
         # Load YOLO results
         with open(yolo_results_path) as f:
-            yolo_results = json.load(f)
+            yolo_data = json.load(f)
+
+        # Handle different YOLO output formats
+        if 'masks' in yolo_data:
+            # Format: {"masks": [...]}
+            detections = yolo_data['masks']
+        elif isinstance(yolo_data, list):
+            # Format: [...]
+            detections = yolo_data
+        else:
+            logger.error(f"Unknown YOLO format in {yolo_results_path}")
+            return []
 
         # Load depth
         depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
@@ -276,14 +287,26 @@ class MaskTo3DConverter:
 
         # Process each detection
         results = []
-        for det_idx, detection in enumerate(yolo_results):
-            # Handle different YOLO output formats
-            if 'segmentation' in detection:
-                polygon = np.array(detection['segmentation'], dtype=np.int32)
-            elif 'polygon' in detection:
-                polygon = np.array(detection['polygon'], dtype=np.int32)
+        for det_idx, detection in enumerate(detections):
+            # Handle different polygon formats
+            if 'polygon' in detection:
+                # Format: "polygon": [[x1, y1], [x2, y2], ...]
+                polygon_coords = detection['polygon']
+                if len(polygon_coords) > 0 and isinstance(polygon_coords[0], list):
+                    # Convert [[x, y], ...] to flat array for cv2.fillPoly
+                    polygon = np.array(polygon_coords, dtype=np.int32)
+                else:
+                    # Already flat [x1, y1, x2, y2, ...]
+                    polygon = np.array(polygon_coords, dtype=np.int32).reshape(-1, 2)
+            elif 'segmentation' in detection:
+                # Format: "segmentation": [x1, y1, x2, y2, ...] or [[x1, y1], ...]
+                seg = detection['segmentation']
+                if isinstance(seg[0], list):
+                    polygon = np.array(seg, dtype=np.int32)
+                else:
+                    polygon = np.array(seg, dtype=np.int32).reshape(-1, 2)
             else:
-                logger.warning(f"[{image_name}] Detection {det_idx}: No segmentation data")
+                logger.warning(f"[{image_name}] Detection {det_idx}: No polygon/segmentation data")
                 continue
 
             # Reconstruct mask from polygon
