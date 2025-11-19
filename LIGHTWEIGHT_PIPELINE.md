@@ -93,36 +93,26 @@ cat outputs/masks_3d/camera_RGB_*.json | python -m json.tool | head -30
 
 ---
 
-### Phase 3: 모든 이미지 일괄 처리
+### Phase 3: 모든 이미지 일괄 처리 (Batch Mode)
 
-배치 스크립트:
+**한 줄 명령으로 모든 이미지 처리**:
 
 ```bash
-#!/bin/bash
-mkdir -p outputs/masks_3d
-
-for rgb in data/rgb/camera_RGB_*.png; do
-    name=$(basename "$rgb" .png)
-    timestamp=$(echo "$name" | sed 's/camera_RGB_//')
-
-    python -m src.mask_to_3d \
-        --rgb-calib calib/rgb_camera_info.json \
-        --depth-calib calib/depth_camera_info.json \
-        --colmap-model data/sfm/sparse/0 \
-        --image "$rgb" \
-        --depth "data/depth/camera_DPT_${timestamp}.png" \
-        --yolo-results "data/yolo_masks/camera_RGB_${timestamp}.json" \
-        --output "outputs/masks_3d/camera_RGB_${timestamp}.json"
-
-    echo "✅ Processed: $name"
-done
+python -m src.mask_to_3d \
+    --rgb-calib calib/rgb_camera_info.json \
+    --depth-calib calib/depth_camera_info.json \
+    --colmap-model data/sfm/sparse/0 \
+    --rgb-dir data/rgb \
+    --depth-dir data/depth \
+    --yolo-dir data/yolo_masks \
+    --output-dir outputs/masks_3d
 ```
 
-저장 후 실행:
-```bash
-chmod +x process_masks_to_3d.sh
-./process_masks_to_3d.sh
-```
+**특징**:
+- ✅ COLMAP 모델 한 번만 로드 (매우 빠름)
+- ✅ Progress bar로 진행상황 표시
+- ✅ 자동 파일 매칭 (timestamp 기반)
+- ✅ 통계 요약 출력
 
 **확인**:
 ```bash
