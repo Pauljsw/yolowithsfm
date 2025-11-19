@@ -23,14 +23,24 @@ Phase 4: Mask-level Grouping
   - Process: Centroid 거리 + Depth 유사도
   - Output: Groups of masks
 
-Phase 5: Measurement
+Phase 5: Visualization & Measurement
   - Input: Grouped masks
-  - Output: 크기, 위치, 심각도 등
+  - Output: 3D 시각화 + 크기, 위치, 심각도 등
 ```
 
 ---
 
-## 실행 방법
+## 📖 완전한 실행 가이드
+
+**전체 실행 방법, 파라미터 설명, 문제 해결은 아래 문서 참조**:
+
+👉 **[EXECUTION_GUIDE.md](EXECUTION_GUIDE.md)** - Complete Step-by-Step Guide
+
+아래는 빠른 참조용 요약입니다.
+
+---
+
+## 실행 방법 (요약)
 
 ### 전제조건
 
@@ -266,7 +276,38 @@ ls data/depth/ | head
 
 ---
 
-## 다음 단계 (Phase 5: Measurement)
+## Phase 5: 3D 시각화 (Open3D)
+
+**SFM Point Cloud + Grouped Crack Masks 함께 보기**:
+
+```bash
+python visualize_simple.py \
+    --groups outputs/groups.json \
+    --masks-3d-dir outputs/masks_3d \
+    --rgb-dir data/rgb \
+    --depth-dir data/depth \
+    --rgb-calib calib/rgb_camera_info.json \
+    --depth-calib calib/depth_camera_info.json \
+    --colmap-model data/sfm/sparse/0 \
+    --min-views 2 \
+    --sample-rate 10
+```
+
+**특징**:
+- ✅ 회색 COLMAP sparse point cloud (배경 참조)
+- ✅ 각 그룹마다 다른 색상으로 표시
+- ✅ 인터랙티브 3D 뷰어 (회전, 확대/축소)
+- ✅ PLY 파일로 저장 가능 (`--save output.ply`)
+
+**조작법**:
+- 왼쪽 마우스: 회전
+- 오른쪽 마우스: 이동
+- 스크롤: 확대/축소
+- ESC: 닫기
+
+---
+
+## Measurement
 
 Groups에서 측정:
 
