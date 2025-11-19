@@ -1,19 +1,23 @@
 """
-Depth to Color (D2C) Alignment for Orbbec Femto Bolt
+Depth to Color (D2C) Alignment for Orbbec Femto Bolt - WITH DISTORTION CORRECTION
 
 Aligns depth images (512x512) to color images (3840x2160) using calibration parameters.
-Uses geometric transformation with intrinsic and extrinsic calibration.
+Includes lens distortion correction for accurate alignment:
+- Depth camera: Heavy distortion (wide FOV, circular pattern)
+- RGB camera: Moderate distortion (narrower FOV)
 
 Usage:
-    # Single image
+    # Single image with distortion correction (recommended)
     python -m src.align_depth_to_rgb \
         --depth-image data/depth/sample.png \
-        --output aligned_depth.png
+        --output aligned_depth.png \
+        --apply-distortion
 
     # Batch processing
     python -m src.align_depth_to_rgb \
         --depth-dir data/depth \
         --output-dir data/depth_upsampled \
+        --apply-distortion \
         --visualize
 """
 
@@ -29,7 +33,10 @@ logger = logging.getLogger(__name__)
 
 
 class DepthToColorAligner:
-    """Align depth images to color camera frame using intrinsic and extrinsic parameters"""
+    """
+    Align depth images to color camera frame using intrinsic and extrinsic parameters
+    Includes LENS DISTORTION correction for accurate alignment
+    """
 
     def __init__(self,
                  rgb_calib_path: str = 'calib/rgb_camera_info.json',
@@ -53,56 +60,172 @@ class DepthToColorAligner:
         with open(extrinsic_path, 'r') as f:
             self.extrinsic = json.load(f)
 
-        # Parse RGB camera parameters
-        self.rgb_K = np.array(self.rgb_calib['K'], dtype=np.float32)
-        self.rgb_D = np.array(self.rgb_calib['D'], dtype=np.float32)
+        # Parse RGB camera parameters (float64 for precision in distortion)
+        self.rgb_K = np.array(self.rgb_calib['K'], dtype=np.float64)
+        self.rgb_D = np.array(self.rgb_calib['D'], dtype=np.float64)
         self.rgb_width = self.rgb_calib['width']
         self.rgb_height = self.rgb_calib['height']
 
         # Parse Depth camera parameters
-        self.depth_K = np.array(self.depth_calib['K'], dtype=np.float32)
-        self.depth_D = np.array(self.depth_calib['D'], dtype=np.float32)
+        self.depth_K = np.array(self.depth_calib['K'], dtype=np.float64)
+        self.depth_D = np.array(self.depth_calib['D'], dtype=np.float64)
         self.depth_width = self.depth_calib['width']
         self.depth_height = self.depth_calib['height']
 
         # Parse extrinsic parameters (Depth to Color transformation)
-        self.R = np.array(self.extrinsic['R'], dtype=np.float32)
-        self.t = np.array(self.extrinsic['t'], dtype=np.float32).reshape(3, 1)
+        self.R = np.array(self.extrinsic['R'], dtype=np.float64)
+        self.t = np.array(self.extrinsic['t'], dtype=np.float64).reshape(3, 1)
 
-        logger.info("Initialized D2C Aligner:")
+        logger.info("Initialized D2C Aligner WITH Distortion Correction:")
         logger.info(f"  RGB: {self.rgb_width}×{self.rgb_height}")
+        logger.info(f"    Distortion (max coeff): {np.max(np.abs(self.rgb_D)):.4f}")
         logger.info(f"  Depth: {self.depth_width}×{self.depth_height}")
+        logger.info(f"    Distortion (max coeff): {np.max(np.abs(self.depth_D)):.4f} ← Heavy!")
         logger.info(f"  Baseline: {self.extrinsic.get('baseline_mm', 'N/A')} mm")
+        logger.info(f"  Distortion model: {self.depth_calib.get('distortion_model', 'unknown')}")
+
+    def undistort_point_rational_polynomial(self,
+                                            u: np.ndarray,
+                                            v: np.ndarray,
+                                            K: np.ndarray,
+                                            D: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply INVERSE distortion correction using rational polynomial model (vectorized)
+
+        Corrects the circular/radial pattern in depth images using iterative Newton-Raphson.
+
+        Rational polynomial model: [k1, k2, p1, p2, k3, k4, k5, k6]
+        - k1-k6: Radial distortion coefficients
+        - p1-p2: Tangential distortion coefficients
+
+        Args:
+            u, v: Distorted pixel coordinates (arrays)
+            K: Camera intrinsic matrix [3x3]
+            D: Distortion coefficients (8 values)
+
+        Returns:
+            (u_undistorted, v_undistorted): Undistorted pixel coordinates (arrays)
+        """
+        # Extract intrinsic parameters
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+
+        # Normalize coordinates to camera frame
+        x = (u - cx) / fx
+        y = (v - cy) / fy
+
+        # Extract distortion coefficients
+        k1, k2, p1, p2 = D[0], D[1], D[2], D[3]
+        k3 = D[4] if len(D) > 4 else 0.0
+        k4 = D[5] if len(D) > 5 else 0.0
+        k5 = D[6] if len(D) > 6 else 0.0
+        k6 = D[7] if len(D) > 7 else 0.0
+
+        # Iterative undistortion using Newton-Raphson
+        x_u, y_u = x.copy(), y.copy()
+
+        for iteration in range(10):  # Converges in 5-10 iterations
+            r2 = x_u * x_u + y_u * y_u
+            r4 = r2 * r2
+            r6 = r4 * r2
+
+            # Rational polynomial radial distortion
+            radial_num = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
+            radial_denom = 1.0 + k4 * r2 + k5 * r4 + k6 * r6
+            radial_denom = np.where(np.abs(radial_denom) > 1e-10, radial_denom, 1.0)
+            radial_factor = radial_num / radial_denom
+
+            # Tangential distortion
+            dx_tangential = 2.0 * p1 * x_u * y_u + p2 * (r2 + 2.0 * x_u * x_u)
+            dy_tangential = p1 * (r2 + 2.0 * y_u * y_u) + 2.0 * p2 * x_u * y_u
+
+            # Solve for undistorted: x_distorted = x_undistorted * radial + tangential
+            x_u_new = (x - dx_tangential) / radial_factor
+            y_u_new = (y - dy_tangential) / radial_factor
+
+            # Check convergence
+            if np.max(np.abs(x_u_new - x_u)) < 1e-8 and np.max(np.abs(y_u_new - y_u)) < 1e-8:
+                break
+
+            x_u, y_u = x_u_new, y_u_new
+
+        # Convert back to pixel coordinates
+        u_undist = x_u * fx + cx
+        v_undist = y_u * fy + cy
+
+        return u_undist, v_undist
+
+    def apply_distortion(self,
+                        x: np.ndarray,
+                        y: np.ndarray,
+                        D: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply FORWARD distortion model (for projecting to color image)
+
+        Args:
+            x, y: Normalized undistorted coordinates (arrays)
+            D: Distortion coefficients
+
+        Returns:
+            (x_distorted, y_distorted): Distorted normalized coordinates (arrays)
+        """
+        k1, k2, p1, p2 = D[0], D[1], D[2], D[3]
+        k3 = D[4] if len(D) > 4 else 0.0
+        k4 = D[5] if len(D) > 5 else 0.0
+        k5 = D[6] if len(D) > 6 else 0.0
+        k6 = D[7] if len(D) > 7 else 0.0
+
+        r2 = x * x + y * y
+        r4 = r2 * r2
+        r6 = r4 * r2
+
+        # Rational polynomial radial distortion
+        radial_num = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
+        radial_denom = 1.0 + k4 * r2 + k5 * r4 + k6 * r6
+        radial_denom = np.where(np.abs(radial_denom) > 1e-10, radial_denom, 1.0)
+        radial = radial_num / radial_denom
+
+        # Tangential distortion
+        dx_tangential = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+        dy_tangential = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+
+        # Apply distortion
+        x_distorted = x * radial + dx_tangential
+        y_distorted = y * radial + dy_tangential
+
+        return x_distorted, y_distorted
 
     def align_depth_to_color(self,
                              depth_image: np.ndarray,
-                             depth_scale: float = 1.0) -> np.ndarray:
+                             depth_scale: float = 1.0,
+                             apply_distortion: bool = True) -> np.ndarray:
         """
         Align depth image to color camera frame using geometric transformation
+
+        This handles the circular depth image pattern and aligns it to rectangular RGB image
 
         Args:
             depth_image: Depth image (512×512), values in millimeters
             depth_scale: Scale factor to convert depth values to meters (default: 1.0 for mm)
+            apply_distortion: Whether to apply distortion correction (HIGHLY RECOMMENDED)
 
         Returns:
             Aligned depth image in color camera resolution (3840×2160), uint16 mm
         """
+        logger.debug(f"Aligning depth to color (distortion={'ON' if apply_distortion else 'OFF'})...")
+
         # Create output aligned depth image
         aligned_depth = np.zeros((self.rgb_height, self.rgb_width), dtype=np.uint16)
 
         # Get depth camera intrinsics
-        fx_d = self.depth_K[0, 0]
-        fy_d = self.depth_K[1, 1]
-        cx_d = self.depth_K[0, 2]
-        cy_d = self.depth_K[1, 2]
+        fx_d, fy_d = self.depth_K[0, 0], self.depth_K[1, 1]
+        cx_d, cy_d = self.depth_K[0, 2], self.depth_K[1, 2]
 
         # Get color camera intrinsics
-        fx_c = self.rgb_K[0, 0]
-        fy_c = self.rgb_K[1, 1]
-        cx_c = self.rgb_K[0, 2]
-        cy_c = self.rgb_K[1, 2]
+        fx_c, fy_c = self.rgb_K[0, 0], self.rgb_K[1, 1]
+        cx_c, cy_c = self.rgb_K[0, 2], self.rgb_K[1, 2]
 
-        # Vectorized processing for speed
+        # Vectorized processing
         v_coords, u_coords = np.meshgrid(range(self.depth_height), range(self.depth_width), indexing='ij')
         u_flat = u_coords.flatten()
         v_flat = v_coords.flatten()
@@ -110,18 +233,26 @@ class DepthToColorAligner:
 
         # Valid depth mask
         valid_mask = depth_flat > 0
-        u_valid = u_flat[valid_mask]
-        v_valid = v_flat[valid_mask]
-        depth_valid = depth_flat[valid_mask]
+        u_valid = u_flat[valid_mask].astype(np.float64)
+        v_valid = v_flat[valid_mask].astype(np.float64)
+        depth_valid = depth_flat[valid_mask].astype(np.float64)
 
-        # Convert depth pixel to 3D point in depth camera frame
+        # Step 1: Undistort depth pixels (correct circular pattern)
+        if apply_distortion:
+            u_undist, v_undist = self.undistort_point_rational_polynomial(
+                u_valid, v_valid, self.depth_K, self.depth_D
+            )
+        else:
+            u_undist, v_undist = u_valid, v_valid
+
+        # Step 2: Convert to 3D point in depth camera frame
         Z_d = depth_valid * depth_scale / 1000.0  # mm to meters
-        X_d = (u_valid - cx_d) * Z_d / fx_d
-        Y_d = (v_valid - cy_d) * Z_d / fy_d
+        X_d = (u_undist - cx_d) * Z_d / fx_d
+        Y_d = (v_undist - cy_d) * Z_d / fy_d
 
         points_depth = np.stack([X_d, Y_d, Z_d], axis=1)  # (N, 3)
 
-        # Transform to color camera frame: P_color = R * P_depth + t
+        # Step 3: Transform to color camera frame: P_color = R * P_depth + t
         points_color = (self.R @ points_depth.T).T + self.t.T  # (N, 3)
 
         X_c = points_color[:, 0]
@@ -135,9 +266,18 @@ class DepthToColorAligner:
         Z_c = Z_c[valid_proj]
         depth_valid_proj = depth_valid[valid_proj]
 
-        # Project to color camera image plane
-        u_c = (fx_c * X_c / Z_c + cx_c).astype(int)
-        v_c = (fy_c * Y_c / Z_c + cy_c).astype(int)
+        # Step 4: Project to color camera image plane
+        x_norm = X_c / Z_c
+        y_norm = Y_c / Z_c
+
+        if apply_distortion:
+            # Apply RGB camera distortion
+            x_dist, y_dist = self.apply_distortion(x_norm, y_norm, self.rgb_D)
+            u_c = (fx_c * x_dist + cx_c).astype(int)
+            v_c = (fy_c * y_dist + cy_c).astype(int)
+        else:
+            u_c = (fx_c * x_norm + cx_c).astype(int)
+            v_c = (fy_c * y_norm + cy_c).astype(int)
 
         # Filter points within image bounds
         valid_bounds = (u_c >= 0) & (u_c < self.rgb_width) & (v_c >= 0) & (v_c < self.rgb_height)
@@ -151,11 +291,14 @@ class DepthToColorAligner:
             if aligned_depth[v, u] == 0 or d < aligned_depth[v, u]:
                 aligned_depth[v, u] = d
 
+        logger.debug(f"  Aligned {len(u_c):,} / {np.sum(valid_mask):,} valid pixels")
+
         return aligned_depth
 
     def align_with_hole_filling(self,
                                  depth_image: np.ndarray,
                                  depth_scale: float = 1.0,
+                                 apply_distortion: bool = True,
                                  inpaint_radius: int = 3) -> np.ndarray:
         """
         Align depth with hole filling using inpainting
@@ -163,16 +306,18 @@ class DepthToColorAligner:
         Args:
             depth_image: Input depth image
             depth_scale: Depth scale factor
+            apply_distortion: Apply distortion correction
             inpaint_radius: Radius for inpainting
 
         Returns:
             Aligned depth image with holes filled
         """
-        aligned_depth = self.align_depth_to_color(depth_image, depth_scale)
+        aligned_depth = self.align_depth_to_color(depth_image, depth_scale, apply_distortion)
 
         # Fill holes using inpainting
         mask = (aligned_depth == 0).astype(np.uint8)
         if np.sum(mask) > 0:
+            logger.debug("  Filling holes with inpainting...")
             aligned_depth = cv2.inpaint(aligned_depth, mask, inpaint_radius, cv2.INPAINT_NS)
 
         return aligned_depth
@@ -226,6 +371,7 @@ class DepthToColorAligner:
 def process_single_image(depth_path: str,
                          output_path: str,
                          aligner: DepthToColorAligner,
+                         apply_distortion: bool = True,
                          fill_holes: bool = False,
                          visualize: bool = False,
                          rgb_path: Optional[str] = None,
@@ -237,6 +383,7 @@ def process_single_image(depth_path: str,
         depth_path: Path to depth image
         output_path: Output path for aligned depth
         aligner: DepthToColorAligner instance
+        apply_distortion: Whether to apply distortion correction
         fill_holes: Whether to fill holes
         visualize: Whether to create visualization
         rgb_path: Optional RGB image path for visualization
@@ -252,9 +399,9 @@ def process_single_image(depth_path: str,
 
     # Align
     if fill_holes:
-        aligned = aligner.align_with_hole_filling(depth)
+        aligned = aligner.align_with_hole_filling(depth, apply_distortion=apply_distortion)
     else:
-        aligned = aligner.align_depth_to_color(depth)
+        aligned = aligner.align_depth_to_color(depth, apply_distortion=apply_distortion)
 
     # Save aligned depth
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +430,7 @@ def process_single_image(depth_path: str,
 def process_batch(depth_dir: str,
                   output_dir: str,
                   rgb_dir: Optional[str] = None,
+                  apply_distortion: bool = True,
                   fill_holes: bool = False,
                   visualize: bool = False,
                   limit: Optional[int] = None) -> None:
@@ -293,6 +441,7 @@ def process_batch(depth_dir: str,
         depth_dir: Input depth directory
         output_dir: Output directory for aligned depth
         rgb_dir: Optional RGB directory for visualization
+        apply_distortion: Whether to apply distortion correction
         fill_holes: Whether to fill holes
         visualize: Whether to create visualizations
         limit: Optional limit on number of images to process
@@ -332,7 +481,6 @@ def process_batch(depth_dir: str,
         rgb_file = None
         if rgb_dir and visualize:
             rgb_path = Path(rgb_dir)
-            # Try to find matching RGB (same stem)
             potential_rgb = rgb_path / depth_file.name
             if potential_rgb.exists():
                 rgb_file = str(potential_rgb)
@@ -346,6 +494,7 @@ def process_batch(depth_dir: str,
                 str(depth_file),
                 str(output_file),
                 aligner,
+                apply_distortion=apply_distortion,
                 fill_holes=fill_holes,
                 visualize=visualize,
                 rgb_path=rgb_file,
@@ -375,19 +524,22 @@ if __name__ == '__main__':
     from .utils import setup_logging
 
     parser = argparse.ArgumentParser(
-        description='Align Depth to Color for Orbbec Femto Bolt',
+        description='Align Depth to Color for Orbbec Femto Bolt (WITH Distortion Correction)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single image
-  python -m src.align_depth_to_rgb --depth-image data/depth/sample.png --output aligned.png
+  # Single image WITH distortion correction (recommended)
+  python -m src.align_depth_to_rgb --depth-image data/depth/sample.png --output aligned.png --apply-distortion
 
-  # Batch processing
-  python -m src.align_depth_to_rgb --depth-dir data/depth --output-dir data/depth_upsampled
+  # Batch processing WITH distortion
+  python -m src.align_depth_to_rgb --depth-dir data/depth --output-dir data/depth_upsampled --apply-distortion
 
   # With visualization
   python -m src.align_depth_to_rgb --depth-dir data/depth --output-dir data/depth_upsampled \\
-      --rgb-dir data/rgb --visualize
+      --rgb-dir data/rgb --visualize --apply-distortion
+
+  # WITHOUT distortion (faster but less accurate)
+  python -m src.align_depth_to_rgb --depth-dir data/depth --output-dir data/depth_upsampled
         """)
 
     # Input/output
@@ -405,6 +557,8 @@ Examples:
                        help='RGB directory for visualization (optional)')
     parser.add_argument('--visualize', action='store_true',
                        help='Create visualization overlays')
+    parser.add_argument('--apply-distortion', action='store_true',
+                       help='Apply lens distortion correction (recommended for accuracy)')
     parser.add_argument('--fill-holes', action='store_true',
                        help='Fill holes in aligned depth using inpainting')
     parser.add_argument('--limit', type=int,
@@ -412,11 +566,11 @@ Examples:
 
     # Calibration (use defaults)
     parser.add_argument('--rgb-calib', type=str, default='calib/rgb_camera_info.json',
-                       help='RGB camera calibration JSON (default: calib/rgb_camera_info.json)')
+                       help='RGB camera calibration JSON')
     parser.add_argument('--depth-calib', type=str, default='calib/depth_camera_info.json',
-                       help='Depth camera calibration JSON (default: calib/depth_camera_info.json)')
+                       help='Depth camera calibration JSON')
     parser.add_argument('--extrinsic', type=str, default='calib/extrinsic_depth_to_color.json',
-                       help='Extrinsic calibration JSON (default: calib/extrinsic_depth_to_color.json)')
+                       help='Extrinsic calibration JSON')
 
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
@@ -452,12 +606,14 @@ Examples:
                 args.depth_image,
                 args.output,
                 aligner,
+                apply_distortion=args.apply_distortion,
                 fill_holes=args.fill_holes,
                 visualize=args.visualize,
                 rgb_path=rgb_path
             )
 
             logger.info(f"\n✓ Processing complete!")
+            logger.info(f"  Distortion correction: {'ON' if args.apply_distortion else 'OFF'}")
             logger.info(f"  Coverage: {stats['coverage']:.1f}%")
             logger.info(f"  Output: {args.output}")
 
@@ -467,6 +623,7 @@ Examples:
                 args.depth_dir,
                 args.output_dir,
                 rgb_dir=args.rgb_dir,
+                apply_distortion=args.apply_distortion,
                 fill_holes=args.fill_holes,
                 visualize=args.visualize,
                 limit=args.limit
