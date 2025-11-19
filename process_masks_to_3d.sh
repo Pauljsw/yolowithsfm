@@ -1,29 +1,27 @@
 #!/bin/bash
 
-# Phase 3 일괄 처리: 모든 YOLO mask를 3D plane으로 변환
-# 실제 프로젝트 파일명 패턴: camera_RGB_*.png, camera_DPT_*.png
+# Phase 3: Mask → 3D 일괄 처리 (Lightweight)
+# Centroid + median depth만 계산
 
-set -e  # 에러 발생 시 중단
+set -e
 
-# 색상 정의
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo "========================================="
-echo "Phase 3: Mask → Plane 일괄 변환"
+echo "Phase 3: Mask → 3D 변환 (Lightweight)"
 echo "========================================="
 
 # 디렉토리 설정
 RGB_DIR="data/rgb"
 DEPTH_DIR="data/depth"
 YOLO_DIR="data/yolo_masks"
-OUTPUT_DIR="outputs/planes"
+OUTPUT_DIR="outputs/masks_3d"
 
 RGB_CALIB="calib/rgb_camera_info.json"
 DEPTH_CALIB="calib/depth_camera_info.json"
-EXTRINSIC="calib/extrinsic_depth_to_color.json"
 COLMAP_MODEL="data/sfm/sparse/0"
 
 # 출력 디렉토리 생성
@@ -39,6 +37,7 @@ fi
 
 if [ ! -d "$DEPTH_DIR" ]; then
     echo -e "${RED}❌ Depth 디렉토리 없음: $DEPTH_DIR${NC}"
+    echo -e "${YELLOW}💡 Depth 이미지가 필요합니다${NC}"
     exit 1
 fi
 
@@ -77,7 +76,6 @@ FAILED=0
 # 각 RGB 이미지에 대해 처리
 for rgb_file in "${RGB_FILES[@]}"; do
     # 파일명에서 타임스탬프 추출
-    # 예: camera_RGB_1758853283_533442048.png → 1758853283_533442048
     filename=$(basename "$rgb_file")
     timestamp=$(echo "$filename" | sed 's/camera_RGB_\(.*\)\.png/\1/')
 
@@ -105,13 +103,12 @@ for rgb_file in "${RGB_FILES[@]}"; do
         continue
     fi
 
-    # Plane 변환 실행
+    # 3D 변환 실행
     echo -e "${GREEN}🔄 변환 시작...${NC}"
 
-    if python -m src.mask_to_plane \
+    if python -m src.mask_to_3d \
         --rgb-calib "$RGB_CALIB" \
         --depth-calib "$DEPTH_CALIB" \
-        --extrinsic "$EXTRINSIC" \
         --colmap-model "$COLMAP_MODEL" \
         --image "$rgb_file" \
         --depth "$depth_file" \
@@ -127,13 +124,13 @@ for rgb_file in "${RGB_FILES[@]}"; do
 import json
 try:
     with open('$output_file') as f:
-        planes = json.load(f)
-    print(f'   📊 평면 개수: {len(planes)}')
-    if len(planes) > 0:
-        avg_planarity = sum(p['quality']['planarity'] for p in planes) / len(planes)
-        avg_coverage = sum(p['quality']['depth_coverage'] for p in planes) / len(planes)
-        print(f'   📏 평균 planarity: {avg_planarity:.3f}')
-        print(f'   📏 평균 coverage: {avg_coverage:.3f}')
+        masks = json.load(f)
+    print(f'   📊 Masks: {len(masks)}개')
+    if len(masks) > 0:
+        avg_depth = sum(m['depth_median'] for m in masks) / len(masks)
+        avg_coverage = sum(m['depth_coverage'] for m in masks) / len(masks)
+        print(f'   📏 평균 depth: {avg_depth:.2f}m')
+        print(f'   📏 평균 coverage: {avg_coverage:.1%}')
 except Exception as e:
     print(f'   ⚠️  결과 확인 실패: {e}')
 "
@@ -159,13 +156,13 @@ echo "출력 위치: $OUTPUT_DIR/"
 echo ""
 
 if [ $PROCESSED -gt 0 ]; then
-    echo -e "${GREEN}다음 단계:${NC}"
-    echo "  python -m src.cluster_planes \\"
+    echo -e "${GREEN}다음 단계 (Phase 4 - Grouping):${NC}"
+    echo "  python -m src.group_masks_3d \\"
     echo "      --input $OUTPUT_DIR/*.json \\"
-    echo "      --output outputs/clusters.json \\"
-    echo "      --angle-threshold 15.0 \\"
-    echo "      --distance-threshold 0.05 \\"
-    echo "      --centroid-threshold 0.5"
+    echo "      --output outputs/groups.json \\"
+    echo "      --distance-threshold 0.5 \\"
+    echo "      --depth-diff-threshold 0.2 \\"
+    echo "      --min-confidence 0.25"
     echo ""
 fi
 
