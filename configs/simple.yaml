@@ -43,6 +43,13 @@ pixel_calibration:
 point_cloud_overlay:
   crack_color: [255, 0, 0]  # Red for cracks
   min_track_length: 2       # Minimum observations per 3D point
+  vote_threshold: 0.5       # Minimum vote ratio (0.5 = majority voting)
+                             # 0.3 = lenient (more cracks, more false positives)
+                             # 0.5 = balanced (recommended)
+                             # 0.7 = strict (fewer cracks, high confidence)
+  min_confidence: 0.25       # Minimum YOLO confidence to consider
+                             # Should be slightly higher than YOLO inference threshold
+                             # Typical range: 0.2-0.4
 
 # Measurement
 measurement:
