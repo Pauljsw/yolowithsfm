@@ -41,6 +41,8 @@ Thumbs.db
 # Project specific
 outputs/
 calibration/scale_maps/
+alignment_check/
+data/depth_upsampled/
 *.ply
 *.npy
 *.log
@@ -48,3 +50,4 @@ calibration/scale_maps/
 # Temporary files
 *.tmp
 *.bak
+check.py
