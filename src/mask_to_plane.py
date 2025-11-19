@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import logging
 from dataclasses import dataclass
-from read_write_model import read_images_binary, Image as ColmapImage
+from src.colmap_io import read_images_binary, Image as ColmapImage, qvec2rotmat
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +265,6 @@ class MaskToPlaneConverter:
 
         # Get camera pose
         # COLMAP stores: R_world_to_cam (qvec), t_world_to_cam (tvec)
-        from read_write_model import qvec2rotmat
         R_world_to_cam = qvec2rotmat(colmap_image.qvec)
         t_world_to_cam = colmap_image.tvec
 
